@@ -1,0 +1,165 @@
+The rationale
+=============
+
+disttable is designed for networks which may have nodes constantly joining and leaving that need to keep track of important data that must
+not be lost. It is assumed that the nodes are "mostly" trustworthy: that is, they may be trusted not to be actively malicious but may have
+errors.
+
+Basic features
+==============
+
+ * Key/Value store accessible from any node in the network in realtime
+
+ * Global (network-wide) table and local (individual node) tables
+
+ * On-disk persistence with protection against partial writes and corruption in case of a node shutdown
+ 
+ * Global distributed locks - individual keys may be locked to a particular node for read, write or both
+
+ * Distributed journalling - similar to a blockchain, operations are sent to the journal and then executed
+
+ * Node authentication - nodes peer to other nodes and authenticate themselves cryptographically
+
+ * Node relocation - nodes may switch peers to other nodes at any time while retaining security
+
+ * Signed checkpoints - copies of the dataset for backup and audit purposes signed by multiple nodes
+
+Basic inter-node protocol
+=========================
+
+Nodes connect to each other via a pre-established IP address and TCP port number, these connections are bidirectional and truly P2P - there is
+no concept of one node being a client or a server to another node. The TCP connection itself may be over SSL or plain, but SSL is recommended.
+
+Each node generates an ECDSA pair for its own use while also storing (in both the local configuration file and the global table) the public key of
+the network administrator.
+
+When a connection is established, each node transmits a message to the other containing its public ECDSA key signed by the administrator's key.
+
+Once both nodes have authenticated each other, they are ready to send/receive and rebroadcast messages. If a node is new to the network it should broadcast
+a request for update message.
+
+After being on the network, nodes should transmit a request for update again at random intervals.
+
+
+Basic user API
+==============
+
+Applications/users make use of the database via a different protocol than the nodes use to communicate with each other using an RPC system.
+
+This RPC system offers the following methods:
+
+Read
+----
+Read from a key, if consistent read is specified then the node will first send a request for update and wait for a dataset update
+If the key is locked for reading, this method may either return an error or wait for the key to be unlocked
+
+Write
+-----
+Write to a key
+If writing to the local table, write request message will not be broadcast to the network, but the local journal will still be updated
+This method should return an ID that can be used to check if the write has been confirmed by network when writing to the global table
+If the key is locked, this method may either return an error or wait for the key to be unlocked
+
+Lock
+----
+Locks a key
+In the local table, this is as simple as setting a mutex, otherwise the relevant network messages are used
+
+Unlock
+------
+Unlocks a key
+
+Checkpoint
+----------
+Generates a checkpoint backup
+This method may wait for checkpoint confirmations or return instantly - in either case it should also return an ID allowing to query for number of confirmations
+
+QueryWriteConfirms
+------------------
+Checks if the write has been confirmed by the network and returns the confirmation count and optionally the node IDs of confirming nodes
+
+QueryCheckpointConfirms
+-----------------------
+Checks for checkpoint confirmations and returns the confirmation count and signatures
+
+Messages
+========
+
+Below is a description of the message types, but should not be considered an actual detailed technical specification.
+
+General notes
+-------------
+Messages can be sent node to node or broadcast. Broadcast messages should be retransmitted to all other peers upon receipt.
+In order to avoid messages endlessly looping through the network, each time a message is retransmitted, the retransmitting node adds its own ID to
+a list in the message. Should a node receive a message with its own ID in the list, it should drop the message.
+
+connection setup
+----------------
+Used when new peers connect, only peer to peer, not broadcast
+
+request for update
+------------------
+Node broadcasts the timestamp and hash of the latest version of the global table it has, or NULL if it is new to the network.
+Upon receiving this message, a node should compare the hash and timestamp to its own current version.
+If the sending node's version is later than the receiving node's version, the receiving node should broadcast its own request for update while
+retransmitting the sending node's request.
+
+If the sending node's version is earlier than the receiving node's version, the receiving node should respond to the sending node with a dataset update message.
+
+dataset update
+--------------
+Node sends a copy of the dataset with a timestamp and hash directly to another node.
+
+write request
+-------------
+Node intends to write a value, upon receiving this message all nodes should write it to their local journal.
+
+write execute
+-------------
+Node has written a previous write request to the dataset.
+Upon receiving this message, all nodes should also execute the write request and respond with a write confirm message.
+
+write confirm
+-------------
+Nodes should send this message upon completing the write. Data may not be considered safe until at least 2 nodes (including the originating node) have confirmed it.
+This message should be signed and the sending node's public key should be included
+
+checkpoint request
+------------------
+This message should only ever be sent by one node at a time for performance reasons.
+The message contains a copy of the dataset with a timestamp and hash.
+Upon receiving this message, all nodes should verify the timestamp and hash and if valid sign the copy and respond to the sending node with a checkpoint verify.
+
+checkpoint verify
+-----------------
+Contains a timestamp and hash signed with the sending node's private key. A copy of the sending node's public key, itself signed by the administrator, should also be included.
+When saving a checkpoint, nodes should also save all the checkpoint verify messages they receive, or a configurable minimal number. This serves a similar purpose to the write request/execute/confirm messages, but for manual backups.
+
+lock key
+--------
+Upon receiving this message, node should lock the specified key as specified in the message and send back a lock confirm message.
+Keys may be locked permanently (this should be used with caution for obvious reasons), until a particular time or until the sending node is disconnected from the network.
+Keys may be locked to read-only, or fully locked. Read-only locks allow only the requesting node to write to the specified key while the lock is active but all nodes may read from it.
+Full locks make the key unavailable completely to other nodes while the lock is active.
+
+If an application or user requests a locked key, the node may either return immediately with an error or schedule an update once the key is unlocked.
+
+lock confirm
+------------
+Sent back to a node requesting a lock
+
+unlock key
+----------
+Sent by a node which previously locked a specified key.
+
+lock update
+-----------
+If a node requests a non-permanent lock and then goes offline, upon reconnection to a peer, that peer must send this message to inform it the lock is no longer valid
+
+node disconnected
+-----------------
+Sent by a node when one of its peers disconnects from the network - this can be used to unlock keys
+
+node connected
+--------------
+Sent by a node when a new peer connects

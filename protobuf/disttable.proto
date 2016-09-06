@@ -1,0 +1,12 @@
+package disttable;
+
+message ConnectionSetup {
+   required string NodeID     = 1;
+   required string pubkey     = 2;
+   required string pubkeysig  = 3;
+}
+
+message RequestUpdate {
+   required uint64 dataset_timestamp = 1;
+   required string hash_sha256       = 2;
+}
